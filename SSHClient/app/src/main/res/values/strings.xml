@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SSH Client</string>
+    <string name="add_connection">添加连接</string>
+    <string name="edit_connection">编辑连接</string>
+    <string name="delete_connection">删除连接</string>
+    <string name="no_connections">暂无连接，点击 + 添加</string>
+    <string name="connection_name">连接名称 *</string>
+    <string name="host">主机地址 *</string>
+    <string name="port">端口</string>
+    <string name="username">用户名 *</string>
+    <string name="password">密码</string>
+    <string name="private_key">私钥 (PEM 格式)</string>
+    <string name="private_key_hint">密码或私钥至少填写一项</string>
+    <string name="save">保存</string>
+    <string name="send">发送</string>
+    <string name="enter_command">输入命令…</string>
+    <string name="fill_required_fields">请填写必填字段（名称、主机、用户名）</string>
+    <string name="invalid_port">端口号无效（1-65535）</string>
+    <string name="auth_required">请填写密码或私钥</string>
+    <string name="delete_confirm">确定删除连接 \"%s\" 吗？</string>
+    <string name="delete">删除</string>
+    <string name="cancel">取消</string>
+</resources>
