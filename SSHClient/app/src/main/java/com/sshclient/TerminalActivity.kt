@@ -8,6 +8,9 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.KeyEvent
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
@@ -34,10 +37,14 @@ class TerminalActivity : AppCompatActivity() {
     // Blinking cursor
     private var cursorOn = true
     private val cursorHandler = Handler(Looper.getMainLooper())
+    private var currentSpannable: SpannableStringBuilder? = null
+    // Reused span object — toggled between visible and transparent to avoid text-length changes
+    private val hiddenCursorSpan = ForegroundColorSpan(Color.TRANSPARENT)
+
     private val cursorRunnable = object : Runnable {
         override fun run() {
             cursorOn = !cursorOn
-            refreshDisplay()
+            refreshCursorOnly()
             cursorHandler.postDelayed(this, CURSOR_BLINK_MS)
         }
     }
@@ -117,10 +124,30 @@ class TerminalActivity : AppCompatActivity() {
 
     // ── Cursor ───────────────────────────────────────────────────────────────
 
-    /** Update the TextView with current buffer + blinking cursor. */
+    /**
+     * Only toggle cursor visibility by changing the span color on the existing
+     * SpannableStringBuilder. This avoids changing text length, which would
+     * trigger a full layout pass and cause the whole view to jitter.
+     */
+    private fun refreshCursorOnly() {
+        val ssb = currentSpannable ?: return
+        val textEnd = ssb.length - CURSOR_CHAR.length
+        if (textEnd < 0) return
+        ssb.removeSpan(hiddenCursorSpan)
+        if (!cursorOn) {
+            ssb.setSpan(hiddenCursorSpan, textEnd, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    /** Rebuild the full display (called when actual content changes). */
     private fun refreshDisplay() {
-        binding.tvOutput.text = if (cursorOn) ansiProcessor.getText() + CURSOR_CHAR
-                                else          ansiProcessor.getText()
+        val text = ansiProcessor.getText()
+        val ssb = SpannableStringBuilder(text + CURSOR_CHAR)
+        currentSpannable = ssb
+        if (!cursorOn) {
+            ssb.setSpan(hiddenCursorSpan, text.length, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        binding.tvOutput.text = ssb
     }
 
     // ── Volume key font size control ─────────────────────────────────────────
