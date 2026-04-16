@@ -30,15 +30,15 @@ class TerminalActivity : AppCompatActivity() {
     private val sshManager = SshManager()
     private val ansiProcessor = AnsiProcessor()
 
-    // Font size state
+    // 字号状态
     private var fontSize = DEFAULT_FONT_SIZE
     private var hideSizeIndicatorRunnable: Runnable? = null
 
-    // Blinking cursor
+    // 闪烁光标
     private var cursorOn = true
     private val cursorHandler = Handler(Looper.getMainLooper())
     private var currentSpannable: SpannableStringBuilder? = null
-    // Reused span object — toggled between visible and transparent to avoid text-length changes
+    // 复用的 span 对象 —— 在可见和透明之间切换,避免文本长度变化
     private val hiddenCursorSpan = ForegroundColorSpan(Color.TRANSPARENT)
 
     private val cursorRunnable = object : Runnable {
@@ -69,14 +69,14 @@ class TerminalActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        // Restore saved font size
+        // 恢复已保存的字号
         fontSize = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getFloat(PREF_FONT_SIZE, DEFAULT_FONT_SIZE)
 
         binding.tvOutput.typeface = Typeface.MONOSPACE
         binding.tvOutput.textSize = fontSize
 
-        // Scroll to bottom whenever the text view is re-laid out (new content added)
+        // 每当 TextView 重新布局时(有新内容加入)滚动到底部
         binding.tvOutput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             binding.scrollView.post { binding.scrollView.fullScroll(View.FOCUS_DOWN) }
         }
@@ -122,12 +122,11 @@ class TerminalActivity : AppCompatActivity() {
         cursorHandler.removeCallbacks(cursorRunnable)
     }
 
-    // ── Cursor ───────────────────────────────────────────────────────────────
+    // ── 光标 ─────────────────────────────────────────────────────────────────
 
     /**
-     * Only toggle cursor visibility by changing the span color on the existing
-     * SpannableStringBuilder. This avoids changing text length, which would
-     * trigger a full layout pass and cause the whole view to jitter.
+     * 仅通过在已有的 SpannableStringBuilder 上修改 span 颜色来切换光标可见性。
+     * 这样可以避免文本长度变化,否则会触发整次布局计算,导致整个视图抖动。
      */
     private fun refreshCursorOnly() {
         val ssb = currentSpannable ?: return
@@ -139,7 +138,7 @@ class TerminalActivity : AppCompatActivity() {
         }
     }
 
-    /** Rebuild the full display (called when actual content changes). */
+    /** 重建完整显示(在实际内容变化时调用)。 */
     private fun refreshDisplay() {
         val text = ansiProcessor.getText()
         val ssb = SpannableStringBuilder(text + CURSOR_CHAR)
@@ -150,7 +149,7 @@ class TerminalActivity : AppCompatActivity() {
         binding.tvOutput.text = ssb
     }
 
-    // ── Volume key font size control ─────────────────────────────────────────
+    // ── 通过音量键控制字号 ────────────────────────────────────────────────────
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
@@ -172,7 +171,7 @@ class TerminalActivity : AppCompatActivity() {
         fontSize = (fontSize + delta).coerceIn(MIN_FONT_SIZE, MAX_FONT_SIZE)
         binding.tvOutput.textSize = fontSize
 
-        // Persist
+        // 持久化保存
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putFloat(PREF_FONT_SIZE, fontSize).apply()
 
@@ -185,10 +184,10 @@ class TerminalActivity : AppCompatActivity() {
         label.alpha = 1f
         label.visibility = View.VISIBLE
 
-        // Cancel any pending hide
+        // 取消任何待执行的隐藏任务
         hideSizeIndicatorRunnable?.let { label.removeCallbacks(it) }
 
-        // Fade out after 1.2 s
+        // 1.2 秒后淡出
         hideSizeIndicatorRunnable = Runnable {
             label.animate()
                 .alpha(0f)
@@ -203,7 +202,7 @@ class TerminalActivity : AppCompatActivity() {
         label.postDelayed(hideSizeIndicatorRunnable!!, 1200)
     }
 
-    // ── Terminal input ────────────────────────────────────────────────────────
+    // ── 终端输入 ──────────────────────────────────────────────────────────────
 
     private fun setupTerminalInput() {
         binding.scrollView.setOnClickListener { binding.terminalInput.showKeyboard() }
@@ -267,15 +266,15 @@ class TerminalActivity : AppCompatActivity() {
     }
 
     private fun appendOutput(raw: String, color: Int = 0) {
-        // SSH output: run through ANSI processor (handles \b, \r, cursor movement, etc.)
-        // Status messages (color != 0): append directly without ANSI processing
+        // SSH 输出:交由 ANSI 处理器处理(处理 \b、\r、光标移动等)
+        // 状态消息(color != 0):直接追加,不经过 ANSI 处理
         if (color == 0) {
             ansiProcessor.process(raw)
         } else {
             ansiProcessor.appendDirect(raw)
         }
         ansiProcessor.trimToLength(MAX_OUTPUT_CHARS)
-        // Reset cursor to visible state on new content so it's always shown right after output
+        // 新内容到来时将光标重置为可见状态,使其在输出后始终显示
         cursorOn = true
         refreshDisplay()
     }

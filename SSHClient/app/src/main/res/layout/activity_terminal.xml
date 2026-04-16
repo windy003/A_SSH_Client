@@ -19,7 +19,7 @@
             app:titleTextColor="@android:color/white" />
     </com.google.android.material.appbar.AppBarLayout>
 
-    <!-- Terminal output area — tap to bring up keyboard -->
+    <!-- 终端输出区域 —— 点击唤出键盘 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -46,14 +46,14 @@
                 android:text="" />
         </ScrollView>
 
-        <!-- Invisible keyboard input capture overlay -->
+        <!-- 不可见的键盘输入捕获覆盖层 -->
         <com.sshclient.ui.TerminalInputView
             android:id="@+id/terminalInput"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="@android:color/transparent" />
 
-        <!-- Font size indicator (shown briefly when volume keys are pressed) -->
+        <!-- 字号指示器(按下音量键时短暂显示) -->
         <TextView
             android:id="@+id/tvFontSize"
             android:layout_width="wrap_content"
@@ -70,7 +70,7 @@
 
     </FrameLayout>
 
-    <!-- Compact special-key toolbar -->
+    <!-- 紧凑型特殊按键工具栏 -->
     <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

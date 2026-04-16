@@ -11,8 +11,8 @@ import android.text.InputType
 import android.view.View
 
 /**
- * An invisible view that captures keyboard input and forwards it directly
- * to the SSH channel — no text field, no send button, just like a real terminal.
+ * 一个不可见的视图,用于捕获键盘输入并直接转发到 SSH 通道 ——
+ * 没有文本框,没有发送按钮,就像真正的终端一样。
  */
 class TerminalInputView @JvmOverloads constructor(
     context: Context,
@@ -40,8 +40,8 @@ class TerminalInputView @JvmOverloads constructor(
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD: no autocorrect, no word learning,
-        // but the IME still handles backspace/delete normally via deleteSurroundingText.
+        // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD:不做自动纠错,不进行词汇学习,
+        // 但输入法依然能通过 deleteSurroundingText 正常处理退格/删除。
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
                 InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
@@ -53,7 +53,7 @@ class TerminalInputView @JvmOverloads constructor(
         return TerminalInputConnection(this)
     }
 
-    // Hardware keyboard entry point — consume all keys to prevent side effects
+    // 硬件键盘入口 —— 吞掉所有按键,防止产生副作用
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) handleKeyDown(event)
         return true
@@ -86,7 +86,7 @@ class TerminalInputView @JvmOverloads constructor(
 
     private inner class TerminalInputConnection(view: View) : BaseInputConnection(view, false) {
 
-        // Fake buffer so the IME reliably calls deleteSurroundingText on backspace
+        // 伪造的缓冲区,使输入法在退格时能够可靠地调用 deleteSurroundingText
         private val fakeBuffer = " ".repeat(16)
         private var lastDeleteSurroundingMs = 0L
 
@@ -96,13 +96,13 @@ class TerminalInputView @JvmOverloads constructor(
         override fun getSelectedText(flags: Int): CharSequence = ""
         override fun getCursorCapsMode(reqModes: Int): Int = 0
 
-        // Normal character input from soft keyboard
+        // 来自软键盘的普通字符输入
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             text?.toString()?.let { if (it.isNotEmpty()) send(it) }
             return true
         }
 
-        // Special keys from soft keyboard — never call super (causes double dispatch)
+        // 来自软键盘的特殊按键 —— 切勿调用 super(会导致重复分发)
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.keyCode == KeyEvent.KEYCODE_DEL) {
@@ -116,12 +116,12 @@ class TerminalInputView @JvmOverloads constructor(
             return true
         }
 
-        // Backspace from soft keyboard
+        // 来自软键盘的退格键
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             if (beforeLength > 0) {
-                // Only record timestamp when we actually sent something,
-                // so a spurious deleteSurroundingText(0,0) doesn't block
-                // the following sendKeyEvent(KEYCODE_DEL).
+                // 只有在实际发送了内容时才记录时间戳,
+                // 这样多余的 deleteSurroundingText(0,0) 调用
+                // 就不会阻塞后续的 sendKeyEvent(KEYCODE_DEL)。
                 lastDeleteSurroundingMs = System.currentTimeMillis()
                 repeat(beforeLength) { send("\u007f") }
             }
