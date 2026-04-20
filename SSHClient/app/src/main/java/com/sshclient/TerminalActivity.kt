@@ -92,7 +92,7 @@ class TerminalActivity : AppCompatActivity() {
                 .connectionDao().getById(connectionId) ?: run { finish(); return@launch }
 
             supportActionBar?.title = "${connection.username}@${connection.host}"
-            appendOutput("Connecting to ${connection.host}:${connection.port}…\r\n", Color.YELLOW)
+            appendOutput("Connecting to ${connection.host}:${connection.port}…\r\n", Color.parseColor("#CC8800"))
 
             try {
                 sshManager.connect(
@@ -103,11 +103,11 @@ class TerminalActivity : AppCompatActivity() {
                     privateKey = connection.privateKey
                 )
                 ansiProcessor.reset()
-                appendOutput("Connected. Tap screen to type.\r\n", Color.GREEN)
+                appendOutput("Connected. Tap screen to type.\r\n", Color.parseColor("#008800"))
                 startReading()
                 binding.terminalInput.showKeyboard()
             } catch (e: Exception) {
-                appendOutput("Connection failed: ${e.message}\r\n", Color.RED)
+                appendOutput("Connection failed: ${e.message}\r\n", Color.parseColor("#CC0000"))
             }
         }
     }
@@ -234,7 +234,7 @@ class TerminalActivity : AppCompatActivity() {
                 sshManager.outputStream?.flush()
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    appendOutput("\r\nSend error: ${e.message}\r\n", Color.RED)
+                    appendOutput("\r\nSend error: ${e.message}\r\n", Color.parseColor("#CC0000"))
                 }
             }
         }
@@ -259,7 +259,7 @@ class TerminalActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    appendOutput("\r\nDisconnected: ${e.message}\r\n", Color.RED)
+                    appendOutput("\r\nDisconnected: ${e.message}\r\n", Color.parseColor("#CC0000"))
                 }
             }
         }

@@ -5,7 +5,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@android:color/black">
+    android:background="@android:color/white">
 
     <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
@@ -15,8 +15,8 @@
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
-            android:background="#1A1A1A"
-            app:titleTextColor="@android:color/white" />
+            android:background="#F0F0F0"
+            app:titleTextColor="#333333" />
     </com.google.android.material.appbar.AppBarLayout>
 
     <!-- 终端输出区域 —— 点击唤出键盘 -->
@@ -29,7 +29,7 @@
             android:id="@+id/scrollView"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:background="@android:color/black"
+            android:background="@android:color/white"
             android:fillViewport="true"
             android:padding="8dp">
 
@@ -38,8 +38,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:textSize="13sp"
-                android:textColor="#00FF41"
-                android:background="@android:color/black"
+                android:textColor="#000000"
+                android:background="@android:color/white"
                 android:fontFamily="monospace"
                 android:lineSpacingExtra="2dp"
                 android:gravity="bottom"
@@ -60,10 +60,10 @@
             android:layout_height="wrap_content"
             android:layout_gravity="top|end"
             android:layout_margin="12dp"
-            android:background="#CC000000"
+            android:background="#CCFFFFFF"
             android:paddingHorizontal="14dp"
             android:paddingVertical="6dp"
-            android:textColor="#FFFFFF"
+            android:textColor="#333333"
             android:textSize="14sp"
             android:fontFamily="monospace"
             android:visibility="gone" />
@@ -74,7 +74,7 @@
     <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#111111"
+        android:background="#EEEEEE"
         android:scrollbars="none">
 
         <LinearLayout
