@@ -1,18 +1,39 @@
 package com.sshclient.ssh
 
 /**
- * 有状态的 ANSI/VT100 处理器。与返回追加字符串的做法不同,
- * 它维护一个持久的显示缓冲区,使得某次服务器响应中的退格(\b)
- * 和光标移动序列可以撤销前一次响应写入的文本。
- * 每次 process() 调用后可通过 getText() 获取当前完整的显示内容。
+ * 基于二维网格的 VT100/xterm 屏幕缓冲器。
+ *
+ * 维护一个 rows × cols 的字符网格,加上一个用于滚出顶部内容的滚动区。
+ * 这是为了能正确处理 Windows ConPTY(以及大多数现代终端程序)使用的
+ * 绝对光标定位序列(ESC[r;cH),否则像 cmd.exe 的 Tab 循环这种就地覆盖
+ * 候选项的行为会被错误地变成追加。
  */
 class AnsiProcessor {
 
-    // 上一段数据残留的字节,可能是一个不完整的转义序列
-    private var pending = ""
+    companion object {
+        private const val DEFAULT_ROWS = 50
+        private const val DEFAULT_COLS = 220
+    }
 
-    // 累积的完整显示文本 —— 由 process() 原地修改
-    private val displayBuffer = StringBuilder()
+    private var rows = DEFAULT_ROWS
+    private var cols = DEFAULT_COLS
+
+    // rows × cols 的活动屏幕网格,每个格子一个字符(默认空格)
+    private var grid = Array(rows) { CharArray(cols) { ' ' } }
+
+    // 光标位置(0 起始)
+    private var cursorRow = 0
+    private var cursorCol = 0
+
+    // 保存的光标位置(用于 ESC 7 / ESC 8)
+    private var savedRow = 0
+    private var savedCol = 0
+
+    // 已滚出屏幕顶部的历史内容
+    private val scrollback = StringBuilder()
+
+    // 上一段数据残留的不完整转义序列
+    private var pending = ""
 
     fun process(raw: String) {
         val input = pending + raw
@@ -21,42 +42,34 @@ class AnsiProcessor {
         var i = 0
         while (i < input.length) {
             val c = input[i]
-
             when {
                 // ── 转义序列 ─────────────────────────────────────────────────
-                c == '\u001b' -> {
+                c == '\u001B' -> {
                     val seqStart = i
                     i++
                     if (i >= input.length) { pending = input.substring(seqStart); break }
 
                     when (input[i]) {
-                        // CSI  ESC [ <参数字节> <终止字节>
+                        // CSI  ESC [ <参数> <终止字节>
                         '[' -> {
                             i++
                             val paramStart = i
-                            while (i < input.length && input[i] in '\u0020'..'\u003f') i++
+                            while (i < input.length && input[i] in ' '..'?') i++
                             val param = input.substring(paramStart, i)
-                            // 中间字节(较少见)
-                            while (i < input.length && input[i] in '\u0020'..'\u002f') i++
+                            while (i < input.length && input[i] in ' '..'/') i++
                             if (i >= input.length) { pending = input.substring(seqStart); break }
                             val final = input[i]
                             if (final in '@'..'~') i++
-
-                            when (final) {
-                                'K' -> eraseInLine(param)
-                                'J' -> eraseInDisplay(param)
-                                'A' -> cursorUp(param)
-                                'M' -> cursorUp(param)
-                            }
+                            handleCsi(final, param)
                         }
 
-                        // OSC  ESC ] <文本> BEL  或  ST
+                        // OSC  ESC ] <文本> BEL  或  ST  —— 我们不实现,跳过即可
                         ']' -> {
                             i++
                             while (i < input.length) {
                                 when {
                                     input[i] == '\u0007' -> { i++; break }
-                                    input[i] == '\u001b' && i + 1 < input.length && input[i + 1] == '\\' -> {
+                                    input[i] == '\u001B' && i + 1 < input.length && input[i + 1] == '\\' -> {
                                         i += 2; break
                                     }
                                     else -> i++
@@ -67,88 +80,215 @@ class AnsiProcessor {
                         // 字符集切换  ESC ( X  /  ESC ) X
                         '(', ')' -> { i++; if (i < input.length) i++ }
 
-                        // ESC M —— 反向索引(光标上移一行)
-                        'M' -> { cursorUp("1"); i++ }
+                        // ESC M —— 反向索引(光标上移一行,顶部需要下滚)
+                        'M' -> { reverseIndex(); i++ }
+                        // ESC 7 / ESC 8 —— 保存/恢复光标
+                        '7' -> { savedRow = cursorRow; savedCol = cursorCol; i++ }
+                        '8' -> { cursorRow = savedRow; cursorCol = savedCol; i++ }
+                        // ESC D —— 索引(下移一行,可能滚动)
+                        'D' -> { lineFeed(); i++ }
+                        // ESC E —— 下一行
+                        'E' -> { lineFeed(); cursorCol = 0; i++ }
 
-                        // 两字符的 ESC 序列:跳过
                         else -> i++
                     }
                 }
 
-                // ── 回车符 ───────────────────────────────────────────────────
-                c == '\r' -> {
-                    i++
-                    if (i < input.length && input[i] == '\n') {
-                        displayBuffer.append('\n'); i++
-                    } else {
-                        goToLineStart()
-                    }
-                }
-
-                // ── 退格符 ───────────────────────────────────────────────────
-                // 直接作用于 displayBuffer,因此可以擦除前一次 process()
-                // 调用写入的字符。
-                c == '\b' -> {
-                    if (displayBuffer.isNotEmpty() && displayBuffer.last() != '\n')
-                        displayBuffer.deleteCharAt(displayBuffer.length - 1)
+                // ── 控制字符 ─────────────────────────────────────────────────
+                c == '\r' -> { cursorCol = 0; i++ }
+                c == '\n' -> { lineFeed(); i++ }
+                c == '\b' -> { if (cursorCol > 0) cursorCol--; i++ }
+                c == '\t' -> {
+                    cursorCol = (((cursorCol / 8) + 1) * 8).coerceAtMost(cols - 1)
                     i++
                 }
-
-                // ── 丢弃其它 C0 控制字符 ──────────────────────────────────────
-                c < '\u0020' && c != '\n' && c != '\t' -> i++
+                c < ' ' -> i++   // 其它 C0 控制字符:忽略
 
                 // ── 普通可打印字符 ────────────────────────────────────────────
-                else -> { displayBuffer.append(c); i++ }
+                else -> { putChar(c); i++ }
             }
         }
     }
 
-    /** 返回当前完整的显示文本。 */
-    fun getText(): String = displayBuffer.toString()
+    // ── CSI 分发 ─────────────────────────────────────────────────────────────
 
-    /**
-     * 直接追加文本而不进行 ANSI 处理(用于本地状态消息)。
-     * \r\n 会被规范化为 \n。
-     */
-    fun appendDirect(text: String) {
-        displayBuffer.append(text.replace("\r\n", "\n").replace('\r', '\n'))
-    }
+    private fun handleCsi(final: Char, param: String) {
+        // 私有模式序列(? > = <)目前一律忽略 —— 我们不实现光标可见性、备用屏等
+        if (param.isNotEmpty() && param[0] in "?>=<") return
 
-    /** 将缓冲区裁剪到不超过 [maxLength] 个字符(保留末尾)。 */
-    fun trimToLength(maxLength: Int) {
-        if (displayBuffer.length > maxLength)
-            displayBuffer.delete(0, displayBuffer.length - maxLength)
-    }
-
-    // ── 光标/擦除辅助方法 ────────────────────────────────────────────────────
-
-    private fun goToLineStart() {
-        val nl = displayBuffer.lastIndexOf('\n')
-        if (nl >= 0) displayBuffer.delete(nl + 1, displayBuffer.length)
-        else displayBuffer.clear()
-    }
-
-    private fun eraseInLine(param: String) { goToLineStart() }
-
-    private fun eraseInDisplay(param: String) {
-        val n = param.trimEnd().toIntOrNull() ?: 0
-        if (n == 2 || n == 3) displayBuffer.clear() else goToLineStart()
-    }
-
-    private fun cursorUp(param: String) {
-        val n = (param.trimEnd().toIntOrNull() ?: 1).coerceAtLeast(1)
-        var linesFound = 0
-        var pos = displayBuffer.length
-        while (pos > 0 && linesFound < n) {
-            pos--
-            if (displayBuffer[pos] == '\n') linesFound++
+        val parts = param.split(';')
+        fun p(idx: Int, default: Int = 1): Int {
+            val s = parts.getOrNull(idx)?.trimEnd() ?: return default
+            return s.toIntOrNull() ?: default
         }
-        if (linesFound == n) displayBuffer.delete(pos + 1, displayBuffer.length)
-        else displayBuffer.clear()
+
+        when (final) {
+            'A' -> cursorRow = (cursorRow - p(0)).coerceAtLeast(0)
+            'B' -> cursorRow = (cursorRow + p(0)).coerceAtMost(rows - 1)
+            'C' -> cursorCol = (cursorCol + p(0)).coerceAtMost(cols - 1)
+            'D' -> cursorCol = (cursorCol - p(0)).coerceAtLeast(0)
+            'E' -> { cursorRow = (cursorRow + p(0)).coerceAtMost(rows - 1); cursorCol = 0 }
+            'F' -> { cursorRow = (cursorRow - p(0)).coerceAtLeast(0); cursorCol = 0 }
+            'G' -> cursorCol = (p(0) - 1).coerceIn(0, cols - 1)
+            'd' -> cursorRow = (p(0) - 1).coerceIn(0, rows - 1)
+            'H', 'f' -> {
+                cursorRow = (p(0, 1) - 1).coerceIn(0, rows - 1)
+                cursorCol = (p(1, 1) - 1).coerceIn(0, cols - 1)
+            }
+            'J' -> eraseInDisplay(p(0, 0))
+            'K' -> eraseInLine(p(0, 0))
+            'L' -> insertLines(p(0))
+            'M' -> deleteLines(p(0))
+            '@' -> insertChars(p(0))
+            'P' -> deleteChars(p(0))
+            'X' -> eraseChars(p(0))
+            'S' -> scrollViewportUp(p(0))
+            'T' -> scrollViewportDown(p(0))
+            's' -> { savedRow = cursorRow; savedCol = cursorCol }
+            'u' -> { cursorRow = savedRow; cursorCol = savedCol }
+            'm' -> { /* SGR(字体/颜色)—— 暂不实现 */ }
+            // 其他:忽略
+        }
+    }
+
+    // ── 字符放置与滚动 ───────────────────────────────────────────────────────
+
+    private fun putChar(c: Char) {
+        if (cursorCol >= cols) {
+            cursorCol = 0
+            cursorRow++
+            if (cursorRow >= rows) { scrollOne(); cursorRow = rows - 1 }
+        }
+        grid[cursorRow][cursorCol] = c
+        cursorCol++
+    }
+
+    private fun lineFeed() {
+        cursorRow++
+        if (cursorRow >= rows) { scrollOne(); cursorRow = rows - 1 }
+    }
+
+    private fun reverseIndex() {
+        cursorRow--
+        if (cursorRow < 0) {
+            for (r in rows - 1 downTo 1) grid[r] = grid[r - 1]
+            grid[0] = CharArray(cols) { ' ' }
+            cursorRow = 0
+        }
+    }
+
+    // 把顶部行滚入 scrollback,其余行上移一行,底部新建空白行
+    private fun scrollOne() {
+        val line = String(grid[0]).trimEnd()
+        scrollback.append(line).append('\n')
+        for (r in 0 until rows - 1) grid[r] = grid[r + 1]
+        grid[rows - 1] = CharArray(cols) { ' ' }
+    }
+
+    private fun scrollViewportUp(n: Int)   { repeat(n.coerceAtLeast(1)) { scrollOne() } }
+    private fun scrollViewportDown(n: Int) {
+        repeat(n.coerceAtLeast(1)) {
+            for (r in rows - 1 downTo 1) grid[r] = grid[r - 1]
+            grid[0] = CharArray(cols) { ' ' }
+        }
+    }
+
+    // ── 擦除 ─────────────────────────────────────────────────────────────────
+
+    private fun eraseInLine(mode: Int) {
+        when (mode) {
+            0 -> for (c in cursorCol until cols) grid[cursorRow][c] = ' '
+            1 -> for (c in 0..cursorCol.coerceAtMost(cols - 1)) grid[cursorRow][c] = ' '
+            2 -> for (c in 0 until cols) grid[cursorRow][c] = ' '
+        }
+    }
+
+    private fun eraseInDisplay(mode: Int) {
+        when (mode) {
+            0 -> {
+                for (c in cursorCol until cols) grid[cursorRow][c] = ' '
+                for (r in cursorRow + 1 until rows) java.util.Arrays.fill(grid[r], ' ')
+            }
+            1 -> {
+                for (r in 0 until cursorRow) java.util.Arrays.fill(grid[r], ' ')
+                for (c in 0..cursorCol.coerceAtMost(cols - 1)) grid[cursorRow][c] = ' '
+            }
+            2, 3 -> for (r in 0 until rows) java.util.Arrays.fill(grid[r], ' ')
+        }
+    }
+
+    private fun eraseChars(n: Int) {
+        val nn = n.coerceAtLeast(1).coerceAtMost(cols - cursorCol)
+        for (c in cursorCol until cursorCol + nn) grid[cursorRow][c] = ' '
+    }
+
+    // ── 行/字符插入与删除 ────────────────────────────────────────────────────
+
+    private fun insertChars(n: Int) {
+        val row = grid[cursorRow]
+        val nn = n.coerceAtLeast(1).coerceAtMost(cols - cursorCol)
+        for (c in cols - 1 downTo cursorCol + nn) row[c] = row[c - nn]
+        for (c in cursorCol until cursorCol + nn) row[c] = ' '
+    }
+
+    private fun deleteChars(n: Int) {
+        val row = grid[cursorRow]
+        val nn = n.coerceAtLeast(1).coerceAtMost(cols - cursorCol)
+        for (c in cursorCol until cols - nn) row[c] = row[c + nn]
+        for (c in cols - nn until cols) row[c] = ' '
+    }
+
+    private fun insertLines(n: Int) {
+        val nn = n.coerceAtLeast(1).coerceAtMost(rows - cursorRow)
+        for (r in rows - 1 downTo cursorRow + nn) grid[r] = grid[r - nn]
+        for (r in cursorRow until cursorRow + nn) grid[r] = CharArray(cols) { ' ' }
+    }
+
+    private fun deleteLines(n: Int) {
+        val nn = n.coerceAtLeast(1).coerceAtMost(rows - cursorRow)
+        for (r in cursorRow until rows - nn) grid[r] = grid[r + nn]
+        for (r in rows - nn until rows) grid[r] = CharArray(cols) { ' ' }
+    }
+
+    // ── 渲染与外部接口 ───────────────────────────────────────────────────────
+
+    /** 当前完整显示文本 = scrollback + 屏幕(末尾空白行被裁掉)。 */
+    fun getText(): String {
+        val sb = StringBuilder()
+        sb.append(scrollback)
+        // 找出最后一个有内容的行
+        var lastNonEmpty = -1
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                if (grid[r][c] != ' ') { lastNonEmpty = r; break }
+            }
+        }
+        val end = maxOf(lastNonEmpty, cursorRow)  // 至少渲染到光标所在行
+        for (r in 0..end) {
+            sb.append(String(grid[r]).trimEnd())
+            if (r < end) sb.append('\n')
+        }
+        return sb.toString()
+    }
+
+    /** 不经过 ANSI 处理直接追加到滚动区,用于本地状态消息/调试输出。 */
+    fun appendDirect(text: String) {
+        scrollback.append(text.replace("\r\n", "\n").replace('\r', '\n'))
+    }
+
+    /** 将 scrollback 裁剪到不超过 [maxLength] 个字符(保留末尾)。 */
+    fun trimToLength(maxLength: Int) {
+        if (scrollback.length > maxLength)
+            scrollback.delete(0, scrollback.length - maxLength)
     }
 
     fun reset() {
         pending = ""
-        displayBuffer.clear()
+        scrollback.clear()
+        for (r in 0 until rows) java.util.Arrays.fill(grid[r], ' ')
+        cursorRow = 0
+        cursorCol = 0
+        savedRow = 0
+        savedCol = 0
     }
 }

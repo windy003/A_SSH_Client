@@ -34,6 +34,10 @@ class TerminalActivity : AppCompatActivity() {
     private var fontSize = DEFAULT_FONT_SIZE
     private var hideSizeIndicatorRunnable: Runnable? = null
 
+    // 调试:保存最近收到的原始字节
+    private val rawHistory = StringBuilder()
+    private val rawHistoryMaxLen = 4096
+
     // 闪烁光标
     private var cursorOn = true
     private val cursorHandler = Handler(Looper.getMainLooper())
@@ -213,6 +217,7 @@ class TerminalActivity : AppCompatActivity() {
     private fun setupSpecialKeys() {
         binding.btnEsc.setOnClickListener   { sendRaw("\u001b") }
         binding.btnTab.setOnClickListener   { sendRaw("\t") }
+        binding.btnTab.setOnLongClickListener { dumpRawHistory(); true }
         binding.btnCtrlC.setOnClickListener { sendRaw("\u0003") }
         binding.btnCtrlD.setOnClickListener { sendRaw("\u0004") }
         binding.btnCtrlZ.setOnClickListener { sendRaw("\u001a") }
@@ -251,6 +256,7 @@ class TerminalActivity : AppCompatActivity() {
                         val n = inputStream.read(buffer, 0, minOf(available, buffer.size))
                         if (n > 0) {
                             val text = String(buffer, 0, n, Charsets.UTF_8)
+                            recordRaw(text)
                             withContext(Dispatchers.Main) { appendOutput(text) }
                         }
                     } else {
@@ -277,6 +283,38 @@ class TerminalActivity : AppCompatActivity() {
         // 新内容到来时将光标重置为可见状态,使其在输出后始终显示
         cursorOn = true
         refreshDisplay()
+    }
+
+    // ── 调试:原始字节记录与转储 ──────────────────────────────────────────────
+
+    @Synchronized
+    private fun recordRaw(text: String) {
+        rawHistory.append(text)
+        if (rawHistory.length > rawHistoryMaxLen) {
+            rawHistory.delete(0, rawHistory.length - rawHistoryMaxLen)
+        }
+    }
+
+    @Synchronized
+    private fun dumpRawHistory() {
+        val snapshot = rawHistory.toString()
+        rawHistory.clear()
+        val sb = StringBuilder("\n[RAW BYTES, len=${snapshot.length}]\n")
+        for (c in snapshot) {
+            when {
+                c == '\u001B' -> sb.append("\\e")
+                c == '\r'     -> sb.append("\\r")
+                c == '\n'     -> sb.append("\\n\n")
+                c == '\t'     -> sb.append("\\t")
+                c == '\b'     -> sb.append("\\b")
+                c == '\u0007' -> sb.append("\\a")
+                c < ' '  -> sb.append(String.format("\\x%02x", c.code))
+                c.code > 0x7E -> sb.append(String.format("\\u%04x", c.code))
+                else          -> sb.append(c)
+            }
+        }
+        sb.append("\n[/RAW]\n")
+        appendOutput(sb.toString(), Color.parseColor("#0066CC"))
     }
 
     override fun onSupportNavigateUp(): Boolean {
