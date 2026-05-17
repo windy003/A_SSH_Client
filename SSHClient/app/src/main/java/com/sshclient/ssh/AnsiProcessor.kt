@@ -256,16 +256,25 @@ class AnsiProcessor {
     fun getText(): String {
         val sb = StringBuilder()
         sb.append(scrollback)
-        // 找出最后一个有内容的行
+        // 找出最后一个有内容的行(从底往上扫,快一些)
         var lastNonEmpty = -1
-        for (r in 0 until rows) {
+        outer@ for (r in rows - 1 downTo 0) {
             for (c in 0 until cols) {
-                if (grid[r][c] != ' ') { lastNonEmpty = r; break }
+                if (grid[r][c] != ' ') { lastNonEmpty = r; break@outer }
             }
         }
         val end = maxOf(lastNonEmpty, cursorRow)  // 至少渲染到光标所在行
         for (r in 0..end) {
-            sb.append(String(grid[r]).trimEnd())
+            val line = grid[r]
+            // 找当前行最后一个非空格列的位置 + 1
+            var contentEnd = 0
+            for (c in cols - 1 downTo 0) {
+                if (line[c] != ' ') { contentEnd = c + 1; break }
+            }
+            // 光标所在行,至少渲染到光标当前列 —— 这样用户敲在末尾的
+            // 空格不会被 trimEnd 吃掉,光标也会正确地"前移"。
+            val extent = if (r == cursorRow) maxOf(contentEnd, cursorCol) else contentEnd
+            if (extent > 0) sb.append(line, 0, extent)
             if (r < end) sb.append('\n')
         }
         return sb.toString()
