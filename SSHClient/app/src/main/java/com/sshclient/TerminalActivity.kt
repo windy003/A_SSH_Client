@@ -4,6 +4,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -11,6 +12,7 @@ import android.os.Looper
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
@@ -34,6 +36,10 @@ class TerminalActivity : AppCompatActivity() {
     private var fontSize = DEFAULT_FONT_SIZE
     private var hideSizeIndicatorRunnable: Runnable? = null
 
+    // 当前 PTY 尺寸(列/行),根据 TextView 实际可显示区域计算
+    private var ptyCols = 80
+    private var ptyRows = 24
+
     // 调试:保存最近收到的原始字节
     private val rawHistory = StringBuilder()
     private val rawHistoryMaxLen = 4096
@@ -42,7 +48,6 @@ class TerminalActivity : AppCompatActivity() {
     private var cursorOn = true
     private val cursorHandler = Handler(Looper.getMainLooper())
     private var currentSpannable: SpannableStringBuilder? = null
-    // 复用的 span 对象 —— 在可见和透明之间切换,避免文本长度变化
     private val hiddenCursorSpan = ForegroundColorSpan(Color.TRANSPARENT)
 
     private val cursorRunnable = object : Runnable {
@@ -56,7 +61,7 @@ class TerminalActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_CONNECTION_ID = "extra_connection_id"
         private const val MAX_OUTPUT_CHARS = 80_000
-        private const val DEFAULT_FONT_SIZE = 13f
+        private const val DEFAULT_FONT_SIZE = 11f
         private const val MIN_FONT_SIZE = 6f
         private const val MAX_FONT_SIZE = 32f
         private const val FONT_STEP = 1f
@@ -73,16 +78,25 @@ class TerminalActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        // 恢复已保存的字号
+        binding.scrollView.setBackgroundColor(Color.WHITE)
+        binding.tvOutput.setBackgroundColor(Color.WHITE)
+        binding.tvOutput.setTextColor(Color.BLACK)
+
         fontSize = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getFloat(PREF_FONT_SIZE, DEFAULT_FONT_SIZE)
 
         binding.tvOutput.typeface = Typeface.MONOSPACE
         binding.tvOutput.textSize = fontSize
 
-        // 每当 TextView 重新布局时(有新内容加入)滚动到底部
+        // 每当 TextView 重新布局时滚动到底部
         binding.tvOutput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             binding.scrollView.post { binding.scrollView.fullScroll(View.FOCUS_DOWN) }
+        }
+
+        // 等容器尺寸确定后,根据实际宽高计算 PTY 列/行
+        binding.tvOutput.post { recomputeTerminalSize() }
+        binding.scrollView.addOnLayoutChangeListener { _, _, _, _, _, oldL, oldT, oldR, oldB ->
+            if (oldR - oldL == 0 || oldB - oldT == 0) recomputeTerminalSize()
         }
 
         setupTerminalInput()
@@ -98,15 +112,21 @@ class TerminalActivity : AppCompatActivity() {
             supportActionBar?.title = "${connection.username}@${connection.host}"
             appendOutput("Connecting to ${connection.host}:${connection.port}…\r\n", Color.parseColor("#CC8800"))
 
+            // 确保在连接之前已经测量过 PTY 尺寸(否则使用默认 80x24)
+            recomputeTerminalSize()
+
             try {
                 sshManager.connect(
                     host = connection.host,
                     port = connection.port,
                     username = connection.username,
                     password = connection.password,
-                    privateKey = connection.privateKey
+                    privateKey = connection.privateKey,
+                    initialCols = ptyCols,
+                    initialRows = ptyRows
                 )
                 ansiProcessor.reset()
+                ansiProcessor.resize(ptyCols, ptyRows)
                 appendOutput("Connected. Tap screen to type.\r\n", Color.parseColor("#008800"))
                 startReading()
                 binding.terminalInput.showKeyboard()
@@ -126,12 +146,44 @@ class TerminalActivity : AppCompatActivity() {
         cursorHandler.removeCallbacks(cursorRunnable)
     }
 
-    // ── 光标 ─────────────────────────────────────────────────────────────────
+    // ── 终端尺寸 ──────────────────────────────────────────────────────────────
 
     /**
-     * 仅通过在已有的 SpannableStringBuilder 上修改 span 颜色来切换光标可见性。
-     * 这样可以避免文本长度变化,否则会触发整次布局计算,导致整个视图抖动。
+     * 根据 TextView 实际宽高与当前字体度量,计算可显示的列/行数,
+     * 同步给 AnsiProcessor 和远端 PTY。
      */
+    private fun recomputeTerminalSize() {
+        val tv = binding.tvOutput
+        val w = tv.width - tv.paddingLeft - tv.paddingRight
+        val h = tv.height - tv.paddingTop - tv.paddingBottom
+        if (w <= 0 || h <= 0) return
+
+        val paint = tv.paint
+        // 取 ASCII 与 box-drawing 字符的最大宽度作为单元宽度:
+        //  - 只用 M 会让 cols 偏大,box-drawing 字符渲染累计起来超出屏幕,
+        //    导致行末的 ╮ ╯ | 被 TextView 自动换行,框右边整列消失。
+        //  - 只用 ─ 又会让 cols 太小,Claude 画出的框比屏幕窄一大块。
+        // 取最大值再不做额外余量是最稳妥的折中。
+        val charW = maxOf(
+            paint.measureText("M"),
+            paint.measureText("─")
+        ).coerceAtLeast(1f)
+        val fm = paint.fontMetrics
+        val lineH = (fm.bottom - fm.top + tv.lineSpacingExtra).coerceAtLeast(1f)
+
+        val cols = (w / charW).toInt().coerceAtLeast(20)
+        val rows = (h / lineH).toInt().coerceAtLeast(8)
+
+        if (cols == ptyCols && rows == ptyRows) return
+        ptyCols = cols
+        ptyRows = rows
+        ansiProcessor.resize(cols, rows)
+        sshManager.resize(cols, rows)
+        refreshDisplay()
+    }
+
+    // ── 光标 ─────────────────────────────────────────────────────────────────
+
     private fun refreshCursorOnly() {
         val ssb = currentSpannable ?: return
         val textEnd = ssb.length - CURSOR_CHAR.length
@@ -142,13 +194,12 @@ class TerminalActivity : AppCompatActivity() {
         }
     }
 
-    /** 重建完整显示(在实际内容变化时调用)。 */
     private fun refreshDisplay() {
-        val text = ansiProcessor.getText()
-        val ssb = SpannableStringBuilder(text + CURSOR_CHAR)
+        val ssb = ansiProcessor.getSpannable()
+        ssb.append(CURSOR_CHAR)
         currentSpannable = ssb
         if (!cursorOn) {
-            ssb.setSpan(hiddenCursorSpan, text.length, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            ssb.setSpan(hiddenCursorSpan, ssb.length - CURSOR_CHAR.length, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         binding.tvOutput.text = ssb
     }
@@ -158,14 +209,8 @@ class TerminalActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
-                KeyEvent.KEYCODE_VOLUME_UP -> {
-                    adjustFontSize(+FONT_STEP)
-                    return true
-                }
-                KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                    adjustFontSize(-FONT_STEP)
-                    return true
-                }
+                KeyEvent.KEYCODE_VOLUME_UP -> { adjustFontSize(+FONT_STEP); return true }
+                KeyEvent.KEYCODE_VOLUME_DOWN -> { adjustFontSize(-FONT_STEP); return true }
             }
         }
         return super.dispatchKeyEvent(event)
@@ -175,23 +220,22 @@ class TerminalActivity : AppCompatActivity() {
         fontSize = (fontSize + delta).coerceIn(MIN_FONT_SIZE, MAX_FONT_SIZE)
         binding.tvOutput.textSize = fontSize
 
-        // 持久化保存
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putFloat(PREF_FONT_SIZE, fontSize).apply()
+
+        // 字号变化后重新计算列/行并通知远端
+        binding.tvOutput.post { recomputeTerminalSize() }
 
         showSizeIndicator()
     }
 
     private fun showSizeIndicator() {
         val label = binding.tvFontSize
-        label.text = "${fontSize.toInt()} sp"
+        label.text = "${fontSize.toInt()} sp  ${ptyCols}x${ptyRows}"
         label.alpha = 1f
         label.visibility = View.VISIBLE
 
-        // 取消任何待执行的隐藏任务
         hideSizeIndicatorRunnable?.let { label.removeCallbacks(it) }
-
-        // 1.2 秒后淡出
         hideSizeIndicatorRunnable = Runnable {
             label.animate()
                 .alpha(0f)
@@ -215,20 +259,20 @@ class TerminalActivity : AppCompatActivity() {
     }
 
     private fun setupSpecialKeys() {
-        binding.btnEsc.setOnClickListener   { sendRaw("\u001b") }
+        binding.btnEsc.setOnClickListener   { sendRaw("\u001B") }
         binding.btnTab.setOnClickListener   { sendRaw("\t") }
         binding.btnTab.setOnLongClickListener { dumpRawHistory(); true }
         binding.btnCtrlC.setOnClickListener { sendRaw("\u0003") }
         binding.btnCtrlD.setOnClickListener { sendRaw("\u0004") }
-        binding.btnCtrlZ.setOnClickListener { sendRaw("\u001a") }
-        binding.btnUp.setOnClickListener    { sendRaw("\u001b[A") }
-        binding.btnDown.setOnClickListener  { sendRaw("\u001b[B") }
-        binding.btnLeft.setOnClickListener  { sendRaw("\u001b[D") }
-        binding.btnRight.setOnClickListener { sendRaw("\u001b[C") }
-        binding.btnHome.setOnClickListener  { sendRaw("\u001b[H") }
-        binding.btnEnd.setOnClickListener   { sendRaw("\u001b[F") }
-        binding.btnPgUp.setOnClickListener  { sendRaw("\u001b[5~") }
-        binding.btnPgDn.setOnClickListener  { sendRaw("\u001b[6~") }
+        binding.btnCtrlZ.setOnClickListener { sendRaw("\u001A") }
+        binding.btnUp.setOnClickListener    { sendRaw("\u001B[A") }
+        binding.btnDown.setOnClickListener  { sendRaw("\u001B[B") }
+        binding.btnLeft.setOnClickListener  { sendRaw("\u001B[D") }
+        binding.btnRight.setOnClickListener { sendRaw("\u001B[C") }
+        binding.btnHome.setOnClickListener  { sendRaw("\u001B[H") }
+        binding.btnEnd.setOnClickListener   { sendRaw("\u001B[F") }
+        binding.btnPgUp.setOnClickListener  { sendRaw("\u001B[5~") }
+        binding.btnPgDn.setOnClickListener  { sendRaw("\u001B[6~") }
     }
 
     private fun sendRaw(data: String) {
@@ -272,15 +316,12 @@ class TerminalActivity : AppCompatActivity() {
     }
 
     private fun appendOutput(raw: String, color: Int = 0) {
-        // SSH 输出:交由 ANSI 处理器处理(处理 \b、\r、光标移动等)
-        // 状态消息(color != 0):直接追加,不经过 ANSI 处理
         if (color == 0) {
             ansiProcessor.process(raw)
         } else {
             ansiProcessor.appendDirect(raw)
         }
         ansiProcessor.trimToLength(MAX_OUTPUT_CHARS)
-        // 新内容到来时将光标重置为可见状态,使其在输出后始终显示
         cursorOn = true
         refreshDisplay()
     }

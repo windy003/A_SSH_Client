@@ -20,7 +20,9 @@ class SshManager {
         port: Int,
         username: String,
         password: String,
-        privateKey: String = ""
+        privateKey: String = "",
+        initialCols: Int = 80,
+        initialRows: Int = 24
     ) = withContext(Dispatchers.IO) {
         val jsch = JSch()
         if (privateKey.isNotBlank()) {
@@ -38,7 +40,8 @@ class SshManager {
         }
         channel = (session!!.openChannel("shell") as ChannelShell).apply {
             setPtyType("xterm-256color")
-            setPtySize(220, 50, 0, 0)
+            // 先用调用方提供的初始尺寸打开 PTY;之后可以随时通过 resize 调整。
+            setPtySize(initialCols, initialRows, 0, 0)
             connect()
         }
         outputStream = channel!!.outputStream
