@@ -4,15 +4,9 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.content.Context
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.style.ForegroundColorSpan
-import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
@@ -37,7 +31,7 @@ class TerminalActivity : AppCompatActivity() {
     private var hideSizeIndicatorRunnable: Runnable? = null
 
     // 当前 PTY 尺寸(列/行),根据 TextView 实际可显示区域计算
-    private var ptyCols = 80
+    private var ptyCols = LOGICAL_COLS
     private var ptyRows = 24
 
     // 调试:保存最近收到的原始字节
@@ -47,13 +41,11 @@ class TerminalActivity : AppCompatActivity() {
     // 闪烁光标
     private var cursorOn = true
     private val cursorHandler = Handler(Looper.getMainLooper())
-    private var currentSpannable: SpannableStringBuilder? = null
-    private val hiddenCursorSpan = ForegroundColorSpan(Color.TRANSPARENT)
 
     private val cursorRunnable = object : Runnable {
         override fun run() {
             cursorOn = !cursorOn
-            refreshCursorOnly()
+            binding.tvOutput.cursorVisible = cursorOn && ansiProcessor.cursorVisibleByApp
             cursorHandler.postDelayed(this, CURSOR_BLINK_MS)
         }
     }
@@ -68,7 +60,8 @@ class TerminalActivity : AppCompatActivity() {
         private const val PREFS_NAME = "terminal_prefs"
         private const val PREF_FONT_SIZE = "font_size"
         private const val CURSOR_BLINK_MS = 500L
-        private const val CURSOR_CHAR = "▏"
+        // 固定的逻辑终端列宽:远端始终按此列数排版,与屏幕宽度/缩放无关。
+        private const val LOGICAL_COLS = 120
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,13 +73,11 @@ class TerminalActivity : AppCompatActivity() {
 
         binding.scrollView.setBackgroundColor(Color.WHITE)
         binding.tvOutput.setBackgroundColor(Color.WHITE)
-        binding.tvOutput.setTextColor(Color.BLACK)
 
         fontSize = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getFloat(PREF_FONT_SIZE, DEFAULT_FONT_SIZE)
 
-        binding.tvOutput.typeface = Typeface.MONOSPACE
-        binding.tvOutput.textSize = fontSize
+        binding.tvOutput.setFontSizeSp(fontSize)
 
         // 每当 TextView 重新布局时滚动到底部
         binding.tvOutput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -149,29 +140,18 @@ class TerminalActivity : AppCompatActivity() {
     // ── 终端尺寸 ──────────────────────────────────────────────────────────────
 
     /**
-     * 根据 TextView 实际宽高与当前字体度量,计算可显示的列/行数,
-     * 同步给 AnsiProcessor 和远端 PTY。
+     * 计算 PTY 行数(按可视高度),列数固定为 [LOGICAL_COLS]。
+     *
+     * 终端列宽与屏幕/缩放解耦:远端始终按固定列数排版,内容完整不被挤压;
+     * 超出屏幕宽度的部分通过 HorizontalScrollView 横向滚动查看,音量键缩放字号。
      */
     private fun recomputeTerminalSize() {
-        val tv = binding.tvOutput
-        val w = tv.width - tv.paddingLeft - tv.paddingRight
-        val h = tv.height - tv.paddingTop - tv.paddingBottom
-        if (w <= 0 || h <= 0) return
+        val lineH = binding.tvOutput.lineHeight
+        val sv = binding.scrollView
+        val h = sv.height - sv.paddingTop - sv.paddingBottom
+        if (h <= 0 || lineH <= 0f) return
 
-        val paint = tv.paint
-        // 取 ASCII 与 box-drawing 字符的最大宽度作为单元宽度:
-        //  - 只用 M 会让 cols 偏大,box-drawing 字符渲染累计起来超出屏幕,
-        //    导致行末的 ╮ ╯ | 被 TextView 自动换行,框右边整列消失。
-        //  - 只用 ─ 又会让 cols 太小,Claude 画出的框比屏幕窄一大块。
-        // 取最大值再不做额外余量是最稳妥的折中。
-        val charW = maxOf(
-            paint.measureText("M"),
-            paint.measureText("─")
-        ).coerceAtLeast(1f)
-        val fm = paint.fontMetrics
-        val lineH = (fm.bottom - fm.top + tv.lineSpacingExtra).coerceAtLeast(1f)
-
-        val cols = (w / charW).toInt().coerceAtLeast(20)
+        val cols = LOGICAL_COLS
         val rows = (h / lineH).toInt().coerceAtLeast(8)
 
         if (cols == ptyCols && rows == ptyRows) return
@@ -184,24 +164,10 @@ class TerminalActivity : AppCompatActivity() {
 
     // ── 光标 ─────────────────────────────────────────────────────────────────
 
-    private fun refreshCursorOnly() {
-        val ssb = currentSpannable ?: return
-        val textEnd = ssb.length - CURSOR_CHAR.length
-        if (textEnd < 0) return
-        ssb.removeSpan(hiddenCursorSpan)
-        if (!cursorOn) {
-            ssb.setSpan(hiddenCursorSpan, textEnd, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-    }
-
     private fun refreshDisplay() {
         val ssb = ansiProcessor.getSpannable()
-        ssb.append(CURSOR_CHAR)
-        currentSpannable = ssb
-        if (!cursorOn) {
-            ssb.setSpan(hiddenCursorSpan, ssb.length - CURSOR_CHAR.length, ssb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        binding.tvOutput.text = ssb
+        binding.tvOutput.setContent(ssb, ansiProcessor.lastCursorIndex)
+        binding.tvOutput.cursorVisible = cursorOn && ansiProcessor.cursorVisibleByApp
     }
 
     // ── 通过音量键控制字号 ────────────────────────────────────────────────────
@@ -218,12 +184,12 @@ class TerminalActivity : AppCompatActivity() {
 
     private fun adjustFontSize(delta: Float) {
         fontSize = (fontSize + delta).coerceIn(MIN_FONT_SIZE, MAX_FONT_SIZE)
-        binding.tvOutput.textSize = fontSize
+        binding.tvOutput.setFontSizeSp(fontSize)
 
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putFloat(PREF_FONT_SIZE, fontSize).apply()
 
-        // 字号变化后重新计算列/行并通知远端
+        // 字号变化后重新计算行数并通知远端(列数固定)
         binding.tvOutput.post { recomputeTerminalSize() }
 
         showSizeIndicator()

@@ -3,7 +3,6 @@ package com.sshclient.ssh
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
-import android.text.style.ForegroundColorSpan
 
 /**
  * 基于二维网格的 VT100/xterm 屏幕缓冲器,支持:
@@ -71,6 +70,11 @@ class AnsiProcessor {
     // 光标
     private var cursorRow = 0
     private var cursorCol = 0
+
+    /** 应用是否要求显示光标(ESC[?25h/l);全屏 TUI 通常隐藏系统光标自行绘制。 */
+    var cursorVisibleByApp = true
+        private set
+
     private var savedRow = 0
     private var savedCol = 0
 
@@ -80,6 +84,10 @@ class AnsiProcessor {
 
     // 滚出屏幕的历史(主屏幕模式下),保留颜色
     private val scrollback = SpannableStringBuilder()
+
+    /** 上一次 getSpannable() 生成的文本中,光标所在的字符下标。 */
+    var lastCursorIndex = 0
+        private set
 
     // 上一段数据残留的不完整转义序列
     private var pending = ""
@@ -116,6 +124,7 @@ class AnsiProcessor {
         savedRow = 0; savedCol = 0
         curFg = COLOR_DEFAULT
         curBg = COLOR_DEFAULT
+        cursorVisibleByApp = true
         inAlternateScreen = false
         mainGrid = null; mainFg = null; mainBg = null
     }
@@ -195,11 +204,18 @@ class AnsiProcessor {
             if (lastNonEmpty >= 0) break
         }
         val end = maxOf(lastNonEmpty, cursorRow)
+        var cursorIdx = out.length
         for (r in 0..end) {
-            appendLineWithSpans(out, grid[r], fg[r], bg[r],
-                if (r == cursorRow) maxOf(cursorCol, lineContentEnd(r)) else lineContentEnd(r))
+            if (r == cursorRow) {
+                val lineStart = out.length
+                appendLineWithSpans(out, grid[r], fg[r], bg[r], maxOf(cursorCol, lineContentEnd(r)))
+                cursorIdx = (lineStart + cursorCol).coerceIn(lineStart, out.length)
+            } else {
+                appendLineWithSpans(out, grid[r], fg[r], bg[r], lineContentEnd(r))
+            }
             if (r < end) out.append('\n')
         }
+        lastCursorIndex = cursorIdx
         return out
     }
 
@@ -273,7 +289,8 @@ class AnsiProcessor {
             47, 1047 -> if (on) enterAlternateScreen(clear = false) else exitAlternateScreen()
             1049 -> if (on) { savedRow = cursorRow; savedCol = cursorCol; enterAlternateScreen(clear = true) }
                     else { exitAlternateScreen(); cursorRow = savedRow.coerceIn(0, rows - 1); cursorCol = savedCol.coerceIn(0, cols - 1) }
-            // 其它如光标可见性 (?25) 等暂不实现
+            // 光标可见性:全屏 TUI 隐藏系统光标后会自行绘制输入光标
+            25 -> cursorVisibleByApp = on
         }
     }
 
@@ -308,6 +325,7 @@ class AnsiProcessor {
         cursorCol = mainCursorCol.coerceIn(0, cols - 1)
         mainGrid = null; mainFg = null; mainBg = null
         inAlternateScreen = false
+        cursorVisibleByApp = true   // 退出全屏应用后恢复系统光标
     }
 
     // ── SGR(颜色 / 样式)──────────────────────────────────────────────────────
@@ -550,9 +568,8 @@ class AnsiProcessor {
         val start = ssb.length
         ssb.append(String(row, from, to - from))
         val end = ssb.length
-        if (segFg != COLOR_DEFAULT) {
-            ssb.setSpan(ForegroundColorSpan(segFg), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
+        // 强制输出文字为黑色:忽略 ANSI 前景色,统一渲染为黑色,
+        // 不再附加 ForegroundColorSpan,使文字回退到 TextView 默认黑色。
         if (segBg != COLOR_DEFAULT) {
             ssb.setSpan(BackgroundColorSpan(segBg), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
