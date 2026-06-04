@@ -21,4 +21,7 @@
     <string name="delete_confirm">确定删除连接 \"%s\" 吗？</string>
     <string name="delete">删除</string>
     <string name="cancel">取消</string>
+    <string name="browse_mode">浏览模式开/关</string>
+    <string name="browse_mode_on">浏览模式：开</string>
+    <string name="browse_mode_off">浏览模式：关</string>
 </resources>

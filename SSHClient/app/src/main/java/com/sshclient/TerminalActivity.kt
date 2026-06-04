@@ -8,7 +8,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.sshclient.data.AppDatabase
@@ -29,6 +32,9 @@ class TerminalActivity : AppCompatActivity() {
     // 字号状态
     private var fontSize = DEFAULT_FONT_SIZE
     private var hideSizeIndicatorRunnable: Runnable? = null
+
+    // 浏览模式:开启时点击终端不弹出输入法,方便滚动查看内容
+    private var browseMode = false
 
     // 当前 PTY 尺寸(列/行),根据 TextView 实际可显示区域计算
     private var ptyCols = LOGICAL_COLS
@@ -219,9 +225,15 @@ class TerminalActivity : AppCompatActivity() {
     // ── 终端输入 ──────────────────────────────────────────────────────────────
 
     private fun setupTerminalInput() {
-        binding.scrollView.setOnClickListener { binding.terminalInput.showKeyboard() }
-        binding.tvOutput.setOnClickListener   { binding.terminalInput.showKeyboard() }
+        binding.scrollView.setOnClickListener { focusTerminal() }
+        binding.tvOutput.setOnClickListener   { focusTerminal() }
         binding.terminalInput.onInput = { data -> sendRaw(data) }
+    }
+
+    /** 点击终端时唤起输入法;浏览模式下不弹出键盘,仅供滚动查看。 */
+    private fun focusTerminal() {
+        if (browseMode) return
+        binding.terminalInput.showKeyboard()
     }
 
     private fun setupSpecialKeys() {
@@ -322,6 +334,34 @@ class TerminalActivity : AppCompatActivity() {
         }
         sb.append("\n[/RAW]\n")
         appendOutput(sb.toString(), Color.parseColor("#0066CC"))
+    }
+
+    // ── 选项菜单(右上角三点) ─────────────────────────────────────────────────
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.terminal_menu, menu)
+        menu.findItem(R.id.action_browse_mode)?.isChecked = browseMode
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_browse_mode -> {
+                browseMode = !browseMode
+                item.isChecked = browseMode
+                if (browseMode) {
+                    // 进入浏览模式时收起键盘,让出更多屏幕空间
+                    binding.terminalInput.hideKeyboard()
+                    Toast.makeText(this, R.string.browse_mode_on, Toast.LENGTH_SHORT).show()
+                } else {
+                    // 退出浏览模式时立即唤起键盘,便于继续输入
+                    binding.terminalInput.showKeyboard()
+                    Toast.makeText(this, R.string.browse_mode_off, Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
     }
 
     override fun onSupportNavigateUp(): Boolean {
