@@ -11,7 +11,6 @@ import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.View
 import kotlin.math.max
-import kotlin.math.min
 
 /**
  * 固定网格自绘终端视图。
@@ -175,7 +174,10 @@ class TerminalView @JvmOverloads constructor(
         val size = MeasureSpec.getSize(spec)
         return when (mode) {
             MeasureSpec.EXACTLY -> max(desired, size)
-            MeasureSpec.AT_MOST -> min(desired, size)
+            // AT_MOST 来自 fillViewport 的重新测量:内容不足一屏时要撑满视口,
+            // 否则视图只有内容那么高,下方空白不属于本视图 —— 点击也就唤不起键盘。
+            // 内容超过一屏时走 UNSPECIFIED 分支,滚动不受影响。
+            MeasureSpec.AT_MOST -> size
             else -> desired
         }
     }

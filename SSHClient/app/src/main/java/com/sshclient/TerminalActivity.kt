@@ -18,16 +18,21 @@ import com.sshclient.data.AppDatabase
 import com.sshclient.databinding.ActivityTerminalBinding
 import com.sshclient.ssh.AnsiProcessor
 import com.sshclient.ssh.SshManager
+import com.sshclient.transfer.Zm
+import com.sshclient.transfer.ZmodemTransferManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 
 class TerminalActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityTerminalBinding
     private val sshManager = SshManager()
     private val ansiProcessor = AnsiProcessor()
+    private lateinit var transferManager: ZmodemTransferManager
 
     // 字号状态
     private var fontSize = DEFAULT_FONT_SIZE
@@ -94,6 +99,11 @@ class TerminalActivity : AppCompatActivity() {
         binding.tvOutput.post { recomputeTerminalSize() }
         binding.scrollView.addOnLayoutChangeListener { _, _, _, _, _, oldL, oldT, oldR, oldB ->
             if (oldR - oldL == 0 || oldB - oldT == 0) recomputeTerminalSize()
+        }
+
+        // registerForActivityResult 要求在 Activity 进入 STARTED 之前完成注册
+        transferManager = ZmodemTransferManager(this) { msg, color ->
+            appendOutput(msg, color)
         }
 
         setupTerminalInput()
@@ -229,7 +239,6 @@ class TerminalActivity : AppCompatActivity() {
         binding.tvOutput.setOnClickListener   { focusTerminal() }
         binding.terminalInput.onInput = { data -> sendRaw(data) }
     }
-
     /** 点击终端时唤起输入法;浏览模式下不弹出键盘,仅供滚动查看。 */
     private fun focusTerminal() {
         if (browseMode) return
@@ -267,23 +276,50 @@ class TerminalActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 终端读循环。
+     *
+     * 按字节读而不是直接解码成字符串 —— ZMODEM 传的是二进制帧,
+     * 一旦按 UTF-8 解码就毁了。每批数据先扫一遍 ZMODEM 起始序列:
+     * 没有就当文本交给 ANSI 处理器,有就把流交给传输会话接管。
+     */
     private fun startReading() {
         lifecycleScope.launch(Dispatchers.IO) {
-            val buffer = ByteArray(4096)
+            val buffer = ByteArray(8192)
+            // 上一批末尾没能凑齐的字节(半个 UTF-8 字符,或半个 ZMODEM 起始序列)
+            val carry = ByteArrayOutputStream()
             try {
                 while (sshManager.isConnected()) {
                     val inputStream = sshManager.inputStream ?: break
                     val available = inputStream.available()
-                    if (available > 0) {
-                        val n = inputStream.read(buffer, 0, minOf(available, buffer.size))
-                        if (n > 0) {
-                            val text = String(buffer, 0, n, Charsets.UTF_8)
-                            recordRaw(text)
-                            withContext(Dispatchers.Main) { appendOutput(text) }
-                        }
-                    } else {
+                    if (available <= 0) {
                         delay(20)
+                        continue
                     }
+                    val n = inputStream.read(buffer, 0, minOf(available, buffer.size))
+                    if (n <= 0) continue
+
+                    val bytes: ByteArray
+                    if (carry.size() > 0) {
+                        carry.write(buffer, 0, n)
+                        bytes = carry.toByteArray()
+                        carry.reset()
+                    } else {
+                        bytes = buffer.copyOf(n)
+                    }
+
+                    val zi = findZmodemStart(bytes)
+                    if (zi >= 0) {
+                        if (zi > 0) emitText(bytes, 0, zi)
+                        runZmodem(inputStream, bytes.copyOfRange(zi, bytes.size))
+                        continue
+                    }
+
+                    // 末尾可能是半个字符或半个起始序列,留到下一批再处理
+                    val hold = holdFrom(bytes, 0, bytes.size)
+                    val end = if (hold >= 0) hold else bytes.size
+                    if (hold >= 0) carry.write(bytes, hold, bytes.size - hold)
+                    emitText(bytes, 0, end)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -291,6 +327,86 @@ class TerminalActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private suspend fun emitText(bytes: ByteArray, from: Int, to: Int) {
+        if (to <= from) return
+        val text = String(bytes, from, to - from, Charsets.UTF_8)
+        recordRaw(text)
+        withContext(Dispatchers.Main) { appendOutput(text) }
+    }
+
+    /** 把流交给 ZMODEM 会话;它跑完之前读循环不碰这个流。 */
+    private suspend fun runZmodem(ins: InputStream, prefetched: ByteArray) {
+        val out = sshManager.outputStream ?: return
+        val leftover = transferManager.runSession(ins, out, prefetched)
+        // 会话多读进去的那部分通常是传输结束后的 shell 提示符,补回终端
+        if (leftover.isNotEmpty()) emitText(leftover, 0, leftover.size)
+    }
+
+    /** 找 ZMODEM 起始序列:`**` ZDLE ZHEX,或 `*` ZDLE ZBIN/ZBIN32。 */
+    private fun findZmodemStart(b: ByteArray): Int {
+        for (i in 0..b.size - 4) {
+            if (b[i].toInt() and 0xFF != Zm.ZPAD) continue
+            val c1 = b[i + 1].toInt() and 0xFF
+            val c2 = b[i + 2].toInt() and 0xFF
+            val c3 = b[i + 3].toInt() and 0xFF
+            if (c1 == Zm.ZPAD && c2 == Zm.ZDLE && c3 == Zm.ZHEX) return i
+            if (c1 == Zm.ZDLE && (c2 == Zm.ZBIN || c2 == Zm.ZBIN32)) return i
+        }
+        return -1
+    }
+
+    /**
+     * 这一批末尾从哪个下标开始需要留到下一批 —— 取“半个 UTF-8 字符”
+     * 与“半个 ZMODEM 起始序列”里更靠前的那个;都没有则返回 -1。
+     */
+    private fun holdFrom(b: ByteArray, from: Int, to: Int): Int {
+        val utf8 = incompleteCharStart(b, from, to)
+        val zm = partialZmodemStart(b, from, to)
+        return when {
+            utf8 < 0 -> zm
+            zm < 0 -> utf8
+            else -> minOf(utf8, zm)
+        }
+    }
+
+    /** 末尾那个 UTF-8 字符是不是被切断了;是则返回它的首字节下标。 */
+    private fun incompleteCharStart(b: ByteArray, from: Int, to: Int): Int {
+        var i = to - 1
+        while (i >= from && i >= to - 4) {
+            val v = b[i].toInt() and 0xFF
+            if (v and 0xC0 != 0x80) {          // 找到了序列首字节
+                val need = when {
+                    v < 0x80 -> 1
+                    v and 0xE0 == 0xC0 -> 2
+                    v and 0xF0 == 0xE0 -> 3
+                    v and 0xF8 == 0xF0 -> 4
+                    else -> 1
+                }
+                return if (i + need > to) i else -1
+            }
+            i--
+        }
+        return -1
+    }
+
+    /** 末尾是不是一个还没凑齐的 ZMODEM 起始序列(`*`、`**`、`**`+ZDLE)。 */
+    private fun partialZmodemStart(b: ByteArray, from: Int, to: Int): Int {
+        for (start in maxOf(from, to - 3) until to) {
+            var ok = true
+            for (i in start until to) {
+                val v = b[i].toInt() and 0xFF
+                val valid = when (i - start) {
+                    0 -> v == Zm.ZPAD
+                    1 -> v == Zm.ZPAD || v == Zm.ZDLE
+                    else -> v == Zm.ZDLE || v == Zm.ZHEX || v == Zm.ZBIN || v == Zm.ZBIN32
+                }
+                if (!valid) { ok = false; break }
+            }
+            if (ok) return start
+        }
+        return -1
     }
 
     private fun appendOutput(raw: String, color: Int = 0) {
