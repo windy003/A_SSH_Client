@@ -2,11 +2,15 @@ package com.sshclient
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.ActionMode
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -41,6 +45,9 @@ class TerminalActivity : AppCompatActivity() {
     // 浏览模式:开启时点击终端不弹出输入法,方便滚动查看内容
     private var browseMode = false
 
+    // 长按选择文本时弹出的悬浮菜单(复制 / 全选)
+    private var selectionActionMode: ActionMode? = null
+
     // 当前 PTY 尺寸(列/行),根据 TextView 实际可显示区域计算
     private var ptyCols = LOGICAL_COLS
     private var ptyRows = 24
@@ -73,6 +80,9 @@ class TerminalActivity : AppCompatActivity() {
         private const val CURSOR_BLINK_MS = 500L
         // 固定的逻辑终端列宽:远端始终按此列数排版,与屏幕宽度/缩放无关。
         private const val LOGICAL_COLS = 120
+        // 选择文本时悬浮菜单的菜单项 id
+        private const val MENU_COPY = 1
+        private const val MENU_SELECT_ALL = 2
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,8 +100,9 @@ class TerminalActivity : AppCompatActivity() {
 
         binding.tvOutput.setFontSizeSp(fontSize)
 
-        // 每当 TextView 重新布局时滚动到底部
+        // 每当 TextView 重新布局时滚动到底部(正在选文本时不打扰用户)
         binding.tvOutput.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (binding.tvOutput.hasSelection) return@addOnLayoutChangeListener
             binding.scrollView.post { binding.scrollView.fullScroll(View.FOCUS_DOWN) }
         }
 
@@ -193,6 +204,10 @@ class TerminalActivity : AppCompatActivity() {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_VOLUME_UP -> { adjustFontSize(+FONT_STEP); return true }
                 KeyEvent.KEYCODE_VOLUME_DOWN -> { adjustFontSize(-FONT_STEP); return true }
+                // 有选区时,返回键先取消选择而不是退出终端
+                KeyEvent.KEYCODE_BACK -> if (binding.tvOutput.hasSelection) {
+                    binding.tvOutput.clearSelection(); return true
+                }
             }
         }
         return super.dispatchKeyEvent(event)
@@ -238,11 +253,70 @@ class TerminalActivity : AppCompatActivity() {
         binding.scrollView.setOnClickListener { focusTerminal() }
         binding.tvOutput.setOnClickListener   { focusTerminal() }
         binding.terminalInput.onInput = { data -> sendRaw(data) }
+        binding.tvOutput.onSelectionChanged = { active -> onSelectionChanged(active) }
     }
     /** 点击终端时唤起输入法;浏览模式下不弹出键盘,仅供滚动查看。 */
     private fun focusTerminal() {
         if (browseMode) return
         binding.terminalInput.showKeyboard()
+    }
+
+    // ── 长按选择文本 / 复制 ───────────────────────────────────────────────────
+
+    /** 选区出现时弹出悬浮菜单,变化时跟着选区移动,消失时收起菜单。 */
+    private fun onSelectionChanged(active: Boolean) {
+        val mode = selectionActionMode
+        when {
+            !active -> { selectionActionMode = null; mode?.finish() }
+            mode == null -> startSelectionActionMode()
+            else -> mode.invalidateContentRect()
+        }
+    }
+
+    private fun startSelectionActionMode() {
+        val callback = object : ActionMode.Callback2() {
+            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                menu.add(0, MENU_COPY, 0, R.string.copy)
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                menu.add(0, MENU_SELECT_ALL, 1, R.string.select_all)
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                return true
+            }
+
+            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean =
+                when (item.itemId) {
+                    MENU_COPY -> { copySelection(); mode.finish(); true }
+                    MENU_SELECT_ALL -> {
+                        binding.tvOutput.selectAll()
+                        mode.invalidateContentRect()
+                        true
+                    }
+                    else -> false
+                }
+
+            override fun onDestroyActionMode(mode: ActionMode) {
+                selectionActionMode = null
+                binding.tvOutput.clearSelection()
+            }
+
+            /** 悬浮菜单贴着选区显示。 */
+            override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
+                binding.tvOutput.getSelectionBounds(outRect)
+                if (outRect.isEmpty) super.onGetContentRect(mode, view, outRect)
+            }
+        }
+        selectionActionMode =
+            binding.tvOutput.startActionMode(callback, ActionMode.TYPE_FLOATING)
+    }
+
+    private fun copySelection() {
+        val text = binding.tvOutput.selectedText
+        if (text.isEmpty()) return
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("terminal", text))
+        Toast.makeText(this, R.string.copied, Toast.LENGTH_SHORT).show()
     }
 
     private fun setupSpecialKeys() {

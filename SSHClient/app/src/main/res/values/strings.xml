@@ -25,4 +25,7 @@
     <string name="browse_mode_on">浏览模式：开</string>
     <string name="browse_mode_off">浏览模式：关</string>
     <string name="transfer_in_progress">文件传输中</string>
+    <string name="copy">复制</string>
+    <string name="select_all">全选</string>
+    <string name="copied">已复制到剪贴板</string>
 </resources>
